@@ -1,0 +1,11 @@
+pandas
+numpy
+streamlit
+plotly
+openpyxl
+google-genai
+python-docx
+reportlab
+python-dotenv
+kaleido
+bcrypt
