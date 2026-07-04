@@ -4,8 +4,19 @@ import os
 import pandas as pd
 import re
 
+import streamlit as st
+
 load_dotenv()
-_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+def _get_api_key():
+    # Try Streamlit Cloud's secrets manager first (used in deployment),
+    # fall back to .env (used for local development)
+    try:
+        return st.secrets["GEMINI_API_KEY"]
+    except (KeyError, FileNotFoundError):
+        return os.getenv("GEMINI_API_KEY")
+
+_client = genai.Client(api_key=_get_api_key())
 
 # Keywords that should never appear in generated code - defense in depth
 # on top of the restricted execution namespace below.
