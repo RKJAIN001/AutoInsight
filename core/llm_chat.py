@@ -4,26 +4,44 @@ import os
 import pandas as pd
 import re
 
-import streamlit as st
-
 load_dotenv()
 
-def _get_api_key():
-    # Try Streamlit Cloud's secrets manager first (used in deployment),
-    # fall back to .env (used for local development)
-    try:
-        return st.secrets["GEMINI_API_KEY"]
-    except (KeyError, FileNotFoundError):
-        return os.getenv("GEMINI_API_KEY")
-
-_client = genai.Client(api_key=_get_api_key())
-
-# Keywords that should never appear in generated code - defense in depth
-# on top of the restricted execution namespace below.
 FORBIDDEN_KEYWORDS = ["import", "open(", "exec(", "eval(", "__", "os.", "sys.", "subprocess", "input("]
 
+_client = None  # created lazily on first use, not at import time
+
+def _get_api_key():
+    """
+    Tries Streamlit Cloud's secrets manager first (used in deployment),
+    falls back to .env (used for local development).
+    Broad exception handling since st.secrets can raise different
+    exception types depending on environment/version.
+    """
+    try:
+        import streamlit as st
+        if "GEMINI_API_KEY" in st.secrets:
+            return st.secrets["GEMINI_API_KEY"]
+    except Exception:
+        pass
+
+    return os.getenv("GEMINI_API_KEY")
+
+def _get_client():
+    """Creates the Gemini client on first use, not at import time -
+    so a missing key fails gracefully inside a chat request instead of
+    crashing the whole app on page load."""
+    global _client
+    if _client is None:
+        api_key = _get_api_key()
+        if not api_key:
+            raise ValueError(
+                "GEMINI_API_KEY not found. Set it in your .env file (local) "
+                "or in Streamlit Cloud's Secrets settings (deployed)."
+            )
+        _client = genai.Client(api_key=api_key)
+    return _client
+
 def _build_schema_context(df):
-    """Describes the dataset's structure to the LLM, without sending all the raw data."""
     dtypes_str = ", ".join(f"{col} ({dtype})" for col, dtype in df.dtypes.items())
     sample_rows = df.head(3).to_string(index=False)
     return f"""
@@ -34,7 +52,7 @@ Sample data (first 3 rows):
 """
 
 def _generate_pandas_expression(question, df):
-    """Asks Gemini to translate a natural-language question into ONE pandas expression."""
+    client = _get_client()
     schema = _build_schema_context(df)
 
     prompt = f"""You are a data analyst assistant. Given a pandas DataFrame called `df` with this structure:
@@ -52,20 +70,15 @@ Rules:
 
 Expression:"""
 
-    response = _client.models.generate_content(
+    response = client.models.generate_content(
         model="gemini-3.5-flash",
         contents=prompt
     )
     expression = response.text.strip()
-    # Strip markdown code fences if Gemini adds them despite instructions
     expression = re.sub(r"^```(python)?|```$", "", expression, flags=re.MULTILINE).strip()
     return expression
 
 def _safe_eval(expression, df):
-    """
-    Executes the pandas expression in a locked-down namespace.
-    Only `df` and `pd` are available - no builtins, no imports, no file/system access.
-    """
     for keyword in FORBIDDEN_KEYWORDS:
         if keyword in expression:
             raise ValueError(f"Generated expression contains a disallowed operation: '{keyword}'")
@@ -77,7 +90,7 @@ def _safe_eval(expression, df):
     return result
 
 def _explain_result(question, expression, result):
-    """Asks Gemini to turn the raw computed result into a natural-language answer."""
+    client = _get_client()
     prompt = f"""The user asked: "{question}"
 We computed this using the expression: {expression}
 The result was: {result}
@@ -85,18 +98,13 @@ The result was: {result}
 Write a short, clear, one-to-two sentence natural-language answer to the user's question based on this result.
 Don't mention the code or expression - just answer naturally, like a data analyst would."""
 
-    response = _client.models.generate_content(
+    response = client.models.generate_content(
         model="gemini-3.5-flash",
         contents=prompt
     )
     return response.text.strip()
 
 def ask_question(question, df):
-    """
-    Main entry point: takes a natural-language question and the dataframe,
-    returns a dict with the answer, the underlying result, and the expression used
-    (for transparency - useful for the report/debugging).
-    """
     try:
         expression = _generate_pandas_expression(question, df)
         result = _safe_eval(expression, df)
